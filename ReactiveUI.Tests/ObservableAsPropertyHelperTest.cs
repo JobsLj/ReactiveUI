@@ -25,6 +25,8 @@ namespace ReactiveUI.Tests
 
                 sched.Start();
 
+                Assert.Equal(input.Last(), fixture.Value);
+
                 // Note: Why doesn't the list match the above one? We're supposed
                 // to suppress duplicate notifications, of course :)
                 (new[] { -5, 1, 2, 3, 4 }).AssertAreEqual(output);
@@ -101,28 +103,33 @@ namespace ReactiveUI.Tests
             });
         }
 
-
         [Fact]
-        public void OAPHShouldBeObservable()
+        public void ToPropertyShouldFireBothChangingAndChanged()
         {
-            (new TestScheduler()).With(sched => {
-                var input = sched.CreateHotObservable(
-                    sched.OnNextAt(100, 5),
-                    sched.OnNextAt(200, 10),
-                    sched.OnNextAt(300, 15),
-                    sched.OnNextAt(400, 20)
-                );
+            var fixture = new OaphTestFixture();
 
-                var result = new List<string>();
+            // NB: This is a hack to connect up the OAPH
+            var dontcare = (fixture.FirstThreeLettersOfOneWord ?? "").Substring(0,0);
 
-                var inputOaph = new ObservableAsPropertyHelper<int>(input, x => { }, 0);
-                var fixture = new ObservableAsPropertyHelper<string>(inputOaph.Select(x => x.ToString()),
-                    result.Add, "0");
+            var resultChanging = fixture.ObservableForProperty(x => x.FirstThreeLettersOfOneWord, beforeChange: true)
+                .CreateCollection();
+            var resultChanged = fixture.ObservableForProperty(x => x.FirstThreeLettersOfOneWord, beforeChange: false)
+                .CreateCollection();
 
-                sched.AdvanceToMs(500);
+            Assert.Empty(resultChanging);
+            Assert.Empty(resultChanged);
 
-                new[] {"0", "5", "10", "15", "20"}.AssertAreEqual(result);
-            });
+            fixture.IsOnlyOneWord = "FooBar";
+            Assert.Equal(1, resultChanging.Count);
+            Assert.Equal(1, resultChanged.Count);
+            Assert.Equal("", resultChanging[0].Value);
+            Assert.Equal("Foo", resultChanged[0].Value);
+
+            fixture.IsOnlyOneWord = "Bazz";
+            Assert.Equal(2, resultChanging.Count);
+            Assert.Equal(2, resultChanged.Count);
+            Assert.Equal("Foo", resultChanging[1].Value);
+            Assert.Equal("Baz", resultChanged[1].Value);
         }
     }
 }

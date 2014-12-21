@@ -1,9 +1,9 @@
 ﻿using System;
+using System.Linq.Expressions;
 using System.Reactive.Disposables;
 using System.Windows.Forms;
 using Xunit;
 using ReactiveUI.Winforms;
-
 
 namespace ReactiveUI.Tests.Winforms
 {
@@ -17,18 +17,42 @@ namespace ReactiveUI.Tests.Winforms
 
             Assert.NotEqual(0, fixture.GetAffinityForObject(typeof(TextBox), "Text"));
 
-            var output = fixture.GetNotificationForProperty(input, "Text").CreateCollection();
+            Expression<Func<TextBox, string>> expression = x => x.Text;
+            var output = fixture.GetNotificationForProperty(input, expression.Body).CreateCollection();
             Assert.Equal(0, output.Count);
 
             input.Text = "Foo";
             Assert.Equal(1, output.Count);
             Assert.Equal(input, output[0].Sender);
-            Assert.Equal("Text", output[0].PropertyName);
-            Assert.Equal("Foo", output[0].Value);
+            Assert.Equal("Text", output[0].GetPropertyName());
 
             output.Dispose();
 
             input.Text = "Bar";
+            Assert.Equal(1, output.Count);
+        }
+
+        [Fact]
+        public void WinformsCreatesObservableForPropertyWorksForComponents()
+        {
+            var input = new ToolStripButton(); // ToolStripButton is a Component, not a Control
+            var fixture = new WinformsCreatesObservableForProperty();
+
+            Assert.NotEqual(0, fixture.GetAffinityForObject(typeof(ToolStripButton), "Checked"));
+
+            Expression<Func<ToolStripButton, bool>> expression = x => x.Checked;
+            var output = fixture.GetNotificationForProperty(input, expression.Body).CreateCollection();
+            Assert.Equal(0, output.Count);
+
+            input.Checked = true;
+            Assert.Equal(1, output.Count);
+            Assert.Equal(input, output[0].Sender);
+            Assert.Equal("Checked", output[0].GetPropertyName());
+
+            output.Dispose();
+
+            // Since we disposed the derived list, we should no longer receive updates
+            input.Checked = false;
             Assert.Equal(1, output.Count);
         }
 
@@ -40,14 +64,14 @@ namespace ReactiveUI.Tests.Winforms
 
             Assert.NotEqual(0, fixture.GetAffinityForObject(typeof(AThirdPartyNamespace.ThirdPartyControl), "Value"));
 
-            var output = fixture.GetNotificationForProperty(input, "Value").CreateCollection();
+            Expression<Func<AThirdPartyNamespace.ThirdPartyControl, string>> expression = x => x.Value;
+            var output = fixture.GetNotificationForProperty(input, expression.Body).CreateCollection();
             Assert.Equal(0, output.Count);
 
             input.Value = "Foo";
             Assert.Equal(1, output.Count);
             Assert.Equal(input, output[0].Sender);
-            Assert.Equal("Value", output[0].PropertyName);
-            Assert.Equal("Foo", output[0].Value);
+            Assert.Equal("Value", output[0].GetPropertyName());
 
             output.Dispose();
 

@@ -7,15 +7,93 @@ using System.Reactive.Linq;
 using System.Text;
 using ReactiveUI.Testing;
 using Xunit;
-
+using Splat;
 using Microsoft.Reactive.Testing;
 using System.Collections.Specialized;
 using System.Reactive.Subjects;
 using System.Reactive;
 using System.Diagnostics;
+using System.Threading;
+using System.Reactive.Disposables;
 
 namespace ReactiveUI.Tests
 {
+    public class FakeCollectionModel : ReactiveObject
+    {
+        bool isHidden;
+        public bool IsHidden {
+            get { return isHidden; }
+            set { this.RaiseAndSetIfChanged(ref isHidden, value); }
+        }
+
+        int someNumber;
+        public int SomeNumber {
+            get { return someNumber; }
+            set { this.RaiseAndSetIfChanged(ref someNumber, value); }
+        }
+    }
+
+    public class FakeCollectionViewModel : ReactiveObject
+    {
+        public FakeCollectionModel Model { get; protected set; }
+
+        ObservableAsPropertyHelper<string> numberAsString;
+        public string NumberAsString {
+            get { return numberAsString.Value; }
+        }
+
+        public FakeCollectionViewModel(FakeCollectionModel model)
+        {
+            Model = model;
+
+            this.WhenAny(x => x.Model.SomeNumber, x => x.Value.ToString())
+                .ToProperty(this, x => x.NumberAsString, out numberAsString);
+        }
+    }
+
+    class NestedTextModel : ReactiveObject 
+    {
+        string text;
+        public string Text {
+            get { return text; }
+            set { this.RaiseAndSetIfChanged(ref text, value); }
+        }
+
+        bool hasData;
+        public bool HasData {
+            get { return hasData; }
+            set { this.RaiseAndSetIfChanged(ref hasData, value); }
+        }
+    }
+
+    class TextModel : ReactiveObject 
+    {
+        NestedTextModel value;
+        public NestedTextModel Value {
+            get {
+                if (value != null) return value;
+                var newValue = 
+                    value = new NestedTextModel() {
+                        Text = "text",
+                        HasData = true
+                    };
+
+                this.RaiseAndSetIfChanged(ref value, newValue);
+                return value;
+            }
+        }
+
+        public bool HasData {
+            get { return Value.HasData; }
+        }
+
+        public TextModel()
+        {
+            this.WhenAnyValue(x => x.Value.HasData)
+                        .Subscribe(_ => this.RaisePropertyChanged("HasData"));
+        }
+    }
+
     public class ReactiveCollectionTest
     {
         [Fact]
@@ -63,7 +141,7 @@ namespace ReactiveUI.Tests
             results.AssertAreEqual(output);
         }
 
-        [Fact]           
+        [Fact]
         public void CollectionCountChangedFiresWhenClearing()
         {
             var items = new ReactiveList<object>(new []{new object()});
@@ -73,6 +151,38 @@ namespace ReactiveUI.Tests
             items.Clear();
 
             Assert.True(countChanged);
+        }
+
+        [Fact]
+        public void WhenAddingRangeOfNullArgumentNullExceptionIsThrown()
+        {
+            var fixture = new ReactiveList<int>();
+
+            Assert.Throws<ArgumentNullException>(() => fixture.AddRange(null));
+        }
+
+        [Fact]
+        public void WhenRemovingAllOfNullArgumentNullExceptionIsThrown()
+        {
+            var fixture = new ReactiveList<int>();
+
+            Assert.Throws<ArgumentNullException>(() => fixture.RemoveAll(null));
+        }
+
+        [Fact]
+        public void WhenInsertingRangeOfNullArgumentNullExceptionIsThrown()
+        {
+            var fixture = new ReactiveList<int>();
+
+            Assert.Throws<ArgumentNullException>(() => fixture.InsertRange(1,null));
+        }
+
+        [Fact]
+        public void WhenInsertingRangeOutOfRangeExceptionIsThrown()
+        {
+            var fixture = new ReactiveList<int>();
+
+            Assert.Throws<ArgumentOutOfRangeException>(() => fixture.InsertRange(1, new List<int>() { 1 }));
         }
 
         [Fact]
@@ -304,7 +414,50 @@ namespace ReactiveUI.Tests
             fixture[5].IsNotNullString = "Baz";
             Assert.Equal(1, reset.Count);
             Assert.Equal(3, itemChanged.Count);
-   }
+        }
+
+        [Fact]
+        public void ChangeTrackingShouldStopWhenAnObjectIsReplacedAndChangeNotificationIsSurpressed()
+        {
+            var fixture = new ReactiveList<TestFixture>() { ChangeTrackingEnabled = true };
+
+            var before_output = new List<Tuple<TestFixture, string>>();
+            var output = new List<Tuple<TestFixture, string>>();
+            var item1 = new TestFixture() { IsOnlyOneWord = "Foo" };
+            var item2 = new TestFixture() { IsOnlyOneWord = "Bar" };
+
+            fixture.ItemChanging.Subscribe(x =>
+            {
+                before_output.Add(new Tuple<TestFixture, string>((TestFixture)x.Sender, x.PropertyName));
+            });
+
+            fixture.ItemChanged.Subscribe(x =>
+            {
+                output.Add(new Tuple<TestFixture, string>((TestFixture)x.Sender, x.PropertyName));
+            });
+
+            fixture.Add(item1);
+
+            item1.IsOnlyOneWord = "Baz";
+            Assert.Equal(1, output.Count);
+            item2.IsNotNullString = "FooBar";
+            Assert.Equal(1, output.Count);
+
+            using (var subscription = fixture.suppressChangeNotifications())
+            {
+                fixture[0] = item2;
+            }
+
+            item1.IsOnlyOneWord = "FooAgain";
+            Assert.Equal(1, output.Count);
+            item2.IsNotNullString = "FooBarBaz";
+            Assert.Equal(2, output.Count);
+
+            new[] { item1, item2 }.AssertAreEqual(output.Select(x => x.Item1));
+            new[] { item1, item2 }.AssertAreEqual(before_output.Select(x => x.Item1));
+            new[] { "IsOnlyOneWord", "IsNotNullString" }.AssertAreEqual(output.Select(x => x.Item2));
+
+        }
 
         [Fact]
         public void GetAResetWhenWeAddALotOfItems()
@@ -315,6 +468,37 @@ namespace ReactiveUI.Tests
 
             fixture.AddRange(new[] { 2,3,4,5,6,7,8,9,10,11,12,13, });
             Assert.Equal(1, reset.Count);
+        }
+
+        [Fact]
+        public void GetARangeWhenWeAddAListOfItems()
+        {
+            var fixture = new ReactiveList<int> { 1, 2, 3, 4, 5 };
+            var changed = fixture.Changed.CreateCollection();
+            Assert.Equal(0, changed.Count);
+
+            fixture.AddRange(new[] { 6, 7 });
+            Assert.Equal(1, changed.Count);
+            Assert.Equal(NotifyCollectionChangedAction.Add, changed.First().Action);
+        }
+
+        [Fact]
+        public void GetSingleItemNotificationWhenWeAddAListOfItemsAndRangeIsFalse()
+        {
+            try {
+                RxApp.SupportsRangeNotifications = false;
+
+                var fixture = new ReactiveList<int> { 1, 2, 3, 4, 5 };
+                var changed = fixture.Changed.CreateCollection();
+                Assert.Equal(0, changed.Count);
+
+                fixture.AddRange(new[] { 6, 7 });
+                Assert.Equal(2, changed.Count);
+                Assert.Equal(NotifyCollectionChangedAction.Add, changed[0].Action);
+                Assert.Equal(NotifyCollectionChangedAction.Add, changed[1].Action);
+            } finally {
+                RxApp.SupportsRangeNotifications = true;
+            }
         }
 
         [Fact]
@@ -775,6 +959,34 @@ namespace ReactiveUI.Tests
             Assert.True(derived.SequenceEqual(new[] { 'D' }));
         }
 
+        [Fact]
+        public void DerviedCollectionShouldHandleItemsRemoved()
+        {
+           var input = new[] { "Foo", "Bar", "Baz", "Bamf" };
+           var disposed = new List<TestFixture>();
+           var fixture = new ReactiveList<TestFixture>(
+               input.Select(x => new TestFixture() { IsOnlyOneWord = x }));
+
+           var output = fixture.CreateDerivedCollection(x => Disposable.Create(() => disposed.Add(x)), item => item.Dispose());
+
+           fixture.Add(new TestFixture() { IsOnlyOneWord = "Hello" });
+           Assert.Equal(5, output.Count);
+
+           fixture.RemoveAt(3);
+           Assert.Equal(4, output.Count);
+           Assert.Equal(1, disposed.Count);
+           Assert.Equal("Bamf", disposed[0].IsOnlyOneWord);
+
+           fixture[1] = new TestFixture() { IsOnlyOneWord = "Goodbye" };
+           Assert.Equal(4, output.Count);
+           Assert.Equal(2, disposed.Count);
+           Assert.Equal("Bar", disposed[1].IsOnlyOneWord);
+
+           var count = output.Count;
+           output.Dispose();
+           Assert.Equal(disposed.Count, 2 + count);
+        }
+
         public class DerivedCollectionLogging
         {
             // We need a sentinel class to make sure no test has triggered the warnings before
@@ -792,10 +1004,9 @@ namespace ReactiveUI.Tests
                 var resolver = new ModernDependencyResolver();
                 var logger = new TestLogger();
 
-                resolver.InitializeResolver();
-                resolver.RegisterConstant(new FuncLogManager(t => new WrappingFullLogger(logger, t)), typeof(ILogManager));
-
                 using(resolver.WithResolver()) {
+                    resolver.RegisterConstant(new FuncLogManager(t => new WrappingFullLogger(logger, t)), typeof(ILogManager));
+
                     var incc = new ReactiveList<NoOneHasEverSeenThisClassBefore>();
                     Assert.True(incc is INotifyCollectionChanged);
                     var inccDerived = incc.CreateDerivedCollection(x => x);
@@ -827,10 +1038,9 @@ namespace ReactiveUI.Tests
                 var resolver = new ModernDependencyResolver();
                 var logger = new TestLogger();
 
-                resolver.InitializeResolver();
-                resolver.RegisterConstant(new FuncLogManager(t => new WrappingFullLogger(logger, t)), typeof(ILogManager));
-
                 using(resolver.WithResolver()) {
+                    resolver.RegisterConstant(new FuncLogManager(t => new WrappingFullLogger(logger, t)), typeof(ILogManager));
+
                     var incc = new ReactiveList<NoOneHasEverSeenThisClassBeforeEither>();
                     var inccDerived = incc.CreateDerivedCollection(x => x);
 
@@ -1456,6 +1666,70 @@ namespace ReactiveUI.Tests
 
             collection.Add(3);
             Assert.Equal(2, orderedCollection.Count);
+        }
+
+        [Fact]
+        public void DerivedCollectionFilterTest()
+        {
+            var models = new ReactiveList<FakeCollectionModel>(
+                new[] { 0, 1, 2, 3, 4, }.Select(x => new FakeCollectionModel() { SomeNumber = x }));
+            models.ChangeTrackingEnabled = true;
+
+            var viewModels = models.CreateDerivedCollection(x => new FakeCollectionViewModel(x), x => !x.IsHidden);
+            Assert.Equal(5, viewModels.Count);
+
+            models[0].IsHidden = true;
+            Assert.Equal(4, viewModels.Count);
+
+            models[4].IsHidden = true;
+            Assert.Equal(3, viewModels.Count);
+
+            models[0].IsHidden = false;
+            Assert.Equal(4, viewModels.Count);
+        }
+
+                
+        ReactiveList<TextModel> makeAsyncCollection(int maxSize) 
+        {
+            return new ReactiveList<TextModel>(Enumerable.Repeat(Unit.Default, maxSize)
+                .Select(_ => new TextModel()));
+        }
+
+        [Fact]
+        public void TestDelayNotifications()
+	{
+            var maxSize = 10;
+            var data = makeAsyncCollection(maxSize);
+
+            var list = new ReactiveList<TextModel>(data) {
+                ChangeTrackingEnabled = true
+            };
+
+            var derivedList = list.CreateDerivedCollection(
+                m => m.Value, m => m.HasData, (a, b) => a.Text.CompareTo(b.Text),
+                Observable.Never(4) /*list.ShouldReset*/, 
+                scheduler: RxApp.MainThreadScheduler);
+
+            derivedList.CountChanged
+                .StartWith(derivedList.Count)
+                .Subscribe(count => {
+                    Console.WriteLine(count);
+                    Assert.True(count <= maxSize);
+                });
+
+            data = makeAsyncCollection(maxSize);
+                
+            Observable.Delay(Observable.Return(Unit.Default), TimeSpan.FromMilliseconds(100))
+                .ObserveOn(RxApp.MainThreadScheduler)
+                .Subscribe(_ => {
+                    using (list.SuppressChangeNotifications()) {
+                        list.Clear();
+                        list.AddRange(data);
+                    }
+                });
+
+            var done = new EventWaitHandle(false, EventResetMode.ManualReset);
+            done.WaitOne(5000);
         }
 
         [Fact]

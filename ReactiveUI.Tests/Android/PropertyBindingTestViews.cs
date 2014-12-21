@@ -9,12 +9,12 @@ using Android;
 using Android.App;
 using Android.Widget;
 using Android.Content;
-using ReactiveUI.Android;
 using Xunit;
+using ReactiveUI;
 
 namespace ReactiveUI.Tests
 {
-    public class PropertyBindView : ReactiveActivity<PropertyBindViewModel>
+    public class PropertyBindView : ReactiveFragment<PropertyBindViewModel>
     {
         public TextView SomeTextBox;
         public TextView Property2;

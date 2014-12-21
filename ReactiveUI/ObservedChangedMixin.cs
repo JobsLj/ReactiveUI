@@ -10,6 +10,15 @@ namespace ReactiveUI
     public static class ObservedChangedMixin
     {
         /// <summary>
+        /// Returns the name of a property which has been changed.
+        /// </summary>
+        /// <returns>The name of the property which has change</returns>
+        public static string GetPropertyName<TSender, TValue>(this IObservedChange<TSender, TValue> This)
+        {
+            return Reflection.ExpressionToPropertyNames(This.Expression);
+        }
+
+        /// <summary>
         /// Returns the current value of a property given a notification that
         /// it has changed.
         /// </summary>
@@ -18,7 +27,7 @@ namespace ReactiveUI
         {
             TValue ret;
             if (!This.TryGetValue(out ret)) {
-                throw new Exception(String.Format("One of the properties in the expression '{0}' was null", This.PropertyName));
+                throw new Exception(String.Format("One of the properties in the expression '{0}' was null", This.GetPropertyName()));
             }
             return ret;
         }
@@ -39,21 +48,7 @@ namespace ReactiveUI
                 return true;
             }
 
-            object current = This.Sender;
-            string fullPropName = This.PropertyName;
-
-            return Reflection.TryGetValueForPropertyChain(out changeValue, current, fullPropName.Split('.'));
-        }
-
-        internal static IObservedChange<TSender, TValue> fillInValue<TSender, TValue>(this IObservedChange<TSender, TValue> This)
-        {
-            // XXX: This is an internal method because I'm unsafely upcasting,
-            // but in certain cases it's needed.
-            var ret = (ObservedChange<TSender, TValue>)This;
-            var val = default(TValue);
-            This.TryGetValue(out val);
-            ret.Value = val;
-            return ret;
+            return Reflection.TryGetValueForPropertyChain(out changeValue, This.Sender, This.Expression.GetExpressionChain());
         }
 
         /// <summary>
@@ -69,7 +64,7 @@ namespace ReactiveUI
             TTarget target,
             Expression<Func<TTarget, TValue>> property)
         {
-            Reflection.SetValueToPropertyChain(target, Reflection.ExpressionToPropertyNames(property), This.GetValue());
+            Reflection.TrySetValueToPropertyChain(target, Reflection.Rewrite(property.Body).GetExpressionChain(), This.GetValue());
         }
 
         /// <summary>

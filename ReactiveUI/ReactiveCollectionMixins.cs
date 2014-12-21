@@ -9,6 +9,9 @@ using System.Reactive.Linq;
 using System.Reactive.Subjects;
 using System.Runtime.CompilerServices;
 using System.Threading;
+using Splat;
+using System.Reactive.Concurrency;
+using System.Linq;
 
 namespace ReactiveUI
 {
@@ -182,7 +185,9 @@ namespace ReactiveUI
         readonly Func<TSource, TValue> selector;
         readonly Func<TSource, bool> filter;
         readonly Func<TValue, TValue, int> orderer;
+        readonly Action<TValue> onRemoved;
         readonly IObservable<Unit> signalReset;
+        readonly IScheduler scheduler;
 
         // This list maps indices in this collection to their corresponding indices in the source collection.
         List<int> indexToSourceIndexMap;
@@ -194,7 +199,9 @@ namespace ReactiveUI
             Func<TSource, TValue> selector,
             Func<TSource, bool> filter,
             Func<TValue, TValue, int> orderer,
-            IObservable<Unit> signalReset)
+            Action<TValue> onRemoved,
+            IObservable<Unit> signalReset,
+            IScheduler scheduler)
         {
             Contract.Requires(source != null);
             Contract.Requires(selector != null);
@@ -206,11 +213,17 @@ namespace ReactiveUI
             this.selector = selector;
             this.filter = filter;
             this.orderer = orderer;
+            this.onRemoved = onRemoved ?? (_ => { });
             this.signalReset = signalReset;
+            this.scheduler = scheduler;
 
             this.inner = new CompositeDisposable();
             this.indexToSourceIndexMap = new List<int>();
             this.sourceCopy = new List<TSource>();
+
+            this.inner.Add(Disposable.Create(() => {
+                foreach (var item in this) { this.onRemoved(item); }
+            }));
 
             this.addAllItemsFromSourceCollection();
             this.wireUpChangeNotifications();
@@ -235,7 +248,7 @@ namespace ReactiveUI
                     }
                 }
             } else {
-                var irncc = source as IReactiveNotifyCollectionChanged;
+                var irncc = source as IReactiveNotifyCollectionChanged<TSource>;
                 var eventObs = irncc != null
                     ? irncc.Changed
                     : Observable
@@ -243,17 +256,17 @@ namespace ReactiveUI
                             x => incc.CollectionChanged += x,
                             x => incc.CollectionChanged -= x)
                         .Select(x => x.EventArgs);
-                inner.Add(eventObs.Subscribe(onSourceCollectionChanged));
+                inner.Add(eventObs.ObserveOn(scheduler).Subscribe(onSourceCollectionChanged));
             }
 
-            var irc = source as IReactiveCollection;
+            var irc = source as IReactiveCollection<TSource>;
 
             if (irc != null) {
-                inner.Add(irc.ItemChanged.Select(x => (TSource)x.Sender).Subscribe(onItemChanged));
+                inner.Add(irc.ItemChanged.Select(x => x.Sender).ObserveOn(scheduler).Subscribe(onItemChanged));
             }
 
             if (signalReset != null) {
-                inner.Add(signalReset.Subscribe(x => this.Reset()));
+                inner.Add(signalReset.ObserveOn(scheduler).Subscribe(x => this.Reset()));
             }
         }
 
@@ -361,7 +374,9 @@ namespace ReactiveUI
 
         void internalReplace(int destinationIndex, TValue newItem)
         {
+            var item = this[destinationIndex];
             base.SetItem(destinationIndex, newItem);
+            onRemoved(item);
         }
 
         /// <summary>
@@ -566,8 +581,11 @@ namespace ReactiveUI
         {
             indexToSourceIndexMap.Clear();
             sourceCopy.Clear();
-
+            var items = this.ToArray();
+            
             base.internalClear();
+
+            foreach (var item in items) { onRemoved(item); }
         }
 
         void internalInsertAndMap(int sourceIndex, TValue value)
@@ -581,7 +599,9 @@ namespace ReactiveUI
         protected override void internalRemoveAt(int destinationIndex)
         {
             indexToSourceIndexMap.RemoveAt(destinationIndex);
+            var item = this[destinationIndex];
             base.internalRemoveAt(destinationIndex);
+            onRemoved(item);
         }
 
         /// <summary>
@@ -852,6 +872,56 @@ namespace ReactiveUI
         /// </summary>
         /// <param name="selector">A Select function that will be run on each
         /// item.</param>
+        /// <param name="onRemoved">An action that is called on each item when
+        /// it is removed.</param>
+        /// <param name="filter">A filter to determine whether to exclude items 
+        /// in the derived collection.</param>
+        /// <param name="orderer">A comparator method to determine the ordering of
+        /// the resulting collection.</param>
+        /// <param name="signalReset">When this Observable is signalled, 
+        /// the derived collection will be manually 
+        /// reordered/refiltered.</param>
+        /// <returns>A new collection whose items are equivalent to
+        /// Collection.Select().Where().OrderBy() and will mirror changes 
+        /// in the initial collection.</returns>
+        public static IReactiveDerivedList<TNew> CreateDerivedCollection<T, TNew, TDontCare>(
+            this IEnumerable<T> This,
+            Func<T, TNew> selector,
+            Action<TNew> onRemoved,
+            Func<T, bool> filter = null,
+            Func<TNew, TNew, int> orderer = null,
+            IObservable<TDontCare> signalReset = null,
+            IScheduler scheduler = null)
+        {
+            Contract.Requires(selector != null);
+
+            IObservable<Unit> reset = null;
+
+            if (signalReset != null) {
+                reset = signalReset.Select(_ => Unit.Default);
+            }
+
+            if (scheduler == null) {
+                scheduler = Scheduler.Immediate;
+            }
+
+            return new ReactiveDerivedCollection<T, TNew>(This, selector, filter, orderer, onRemoved, reset, scheduler);
+        }
+
+        /// <summary>
+        /// Creates a collection whose contents will "follow" another
+        /// collection; this method is useful for creating ViewModel collections
+        /// that are automatically updated when the respective Model collection
+        /// is updated.
+        ///
+        /// Note that even though this method attaches itself to any 
+        /// IEnumerable, it will only detect changes from objects implementing
+        /// INotifyCollectionChanged (like ReactiveList). If your source
+        /// collection doesn't implement this, signalReset is the way to signal
+        /// the derived collection to reorder/refilter itself.
+        /// </summary>
+        /// <param name="selector">A Select function that will be run on each
+        /// item.</param>
         /// <param name="filter">A filter to determine whether to exclude items 
         /// in the derived collection.</param>
         /// <param name="orderer">A comparator method to determine the ordering of
@@ -867,17 +937,43 @@ namespace ReactiveUI
             Func<T, TNew> selector,
             Func<T, bool> filter = null,
             Func<TNew, TNew, int> orderer = null,
-            IObservable<TDontCare> signalReset = null)
+            IObservable<TDontCare> signalReset = null,
+            IScheduler scheduler = null)
         {
-            Contract.Requires(selector != null);
+            return This.CreateDerivedCollection(selector, (Action<TNew>)null, filter, orderer, signalReset, scheduler);
+        }
 
-            IObservable<Unit> reset = null;
-
-            if (signalReset != null) {
-                reset = signalReset.Select(_ => Unit.Default);
-            }
-
-            return new ReactiveDerivedCollection<T, TNew>(This, selector, filter, orderer, reset);
+        /// <summary>
+        /// Creates a collection whose contents will "follow" another
+        /// collection; this method is useful for creating ViewModel collections
+        /// that are automatically updated when the respective Model collection
+        /// is updated.
+        /// 
+        /// Be aware that this overload will result in a collection that *only* 
+        /// updates if the source implements INotifyCollectionChanged. If your
+        /// list changes but isn't a ReactiveList/ObservableCollection,
+        /// you probably want to use the other overload.
+        /// </summary>
+        /// <param name="selector">A Select function that will be run on each
+        /// item.</param>
+        /// <param name="onRemoved">An action that is called on each item when
+        /// it is removed.</param>
+        /// <param name="filter">A filter to determine whether to exclude items 
+        /// in the derived collection.</param>
+        /// <param name="orderer">A comparator method to determine the ordering of
+        /// the resulting collection.</param>
+        /// <returns>A new collection whose items are equivalent to
+        /// Collection.Select().Where().OrderBy() and will mirror changes 
+        /// in the initial collection.</returns>
+        public static IReactiveDerivedList<TNew> CreateDerivedCollection<T, TNew>(
+            this IEnumerable<T> This,
+            Func<T, TNew> selector,
+            Action<TNew> onRemoved,
+            Func<T, bool> filter = null,
+            Func<TNew, TNew, int> orderer = null,
+            IScheduler scheduler = null)
+        {
+            return This.CreateDerivedCollection(selector, onRemoved, filter, orderer, (IObservable<Unit>)null, scheduler);
         }
 
         /// <summary>
@@ -904,9 +1000,11 @@ namespace ReactiveUI
             this IEnumerable<T> This,
             Func<T, TNew> selector,
             Func<T, bool> filter = null,
-            Func<TNew, TNew, int> orderer = null)
+            Func<TNew, TNew, int> orderer = null,
+            IScheduler scheduler = null)
         {
-            return This.CreateDerivedCollection(selector, filter, orderer, (IObservable<Unit>)null);
+            return This.CreateDerivedCollection(selector, default(Action<TNew>), filter, orderer, (IObservable<Unit>)null, scheduler);
         }
+
     }
 }
